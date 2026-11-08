@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>G01 扩展功能全场景自测</title>
+<style>
+  :root {
+    --bg: #0b1118; --panel: #121b26; --panel2: #0f1721; --line: #1f2d3d;
+    --txt: #e6eef8; --sub: #8ea3ba; --mint: #36e0b0; --amber: #ffbf5a;
+    --red: #ff6b7a; --cyan: #60c8ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: radial-gradient(1200px 600px at 20% -10%, #16263a 0, var(--bg) 55%);
+    color: var(--txt); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 22px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: .01em; }
+  .sub { color: var(--sub); margin: 0 0 18px; }
+  .summary {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; margin-bottom: 18px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px;
+  }
+  .card label { display: block; color: var(--sub); font-size: 12px; }
+  .card b { font-size: 22px; font-variant-numeric: tabular-nums; }
+  .card.pass b { color: var(--mint); }
+  .card.fail b { color: var(--red); }
+  .card.time b { color: var(--cyan); font-size: 16px; }
+  .rules {
+    background: var(--panel2); border: 1px solid var(--line); border-left: 3px solid var(--cyan);
+    border-radius: 10px; padding: 12px 14px; color: var(--sub); margin-bottom: 18px; font-size: 13px;
+  }
+  .rules strong { color: var(--txt); }
+  .group-title {
+    margin: 20px 0 8px; font-weight: 600; font-size: 15px; color: var(--mint);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .group-title::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mint); }
+  .test {
+    display: grid; grid-template-columns: 52px 1fr auto; gap: 10px; align-items: start;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px;
+  }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .06em; padding: 2px 8px; border-radius: 999px; text-align: center; }
+  .badge.pass { color: var(--mint); background: rgba(54, 224, 176, .12); border: 1px solid rgba(54, 224, 176, .35); }
+  .badge.fail { color: var(--red); background: rgba(255, 107, 122, .12); border: 1px solid rgba(255, 107, 122, .4); }
+  .name { font-weight: 600; }
+  .detail { color: var(--sub); font-size: 12.5px; margin-top: 2px; word-break: break-all; }
+  .test.failrow { border-color: rgba(255, 107, 122, .4); }
+  .foot { color: #5d7086; font-size: 12px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>G01 扩展功能全场景自测</h1>
+  <p class="sub">A 角度 · C 倒角 · R 拐角圆角 · U/W 增量 · 刀尖半径补偿（程序刀心 → 实际轮廓） · 测量基准规范</p>
+
+  <div class="summary">
+    <div class="card pass"><label>通过</label><b id="passCount">—</b></div>
+    <div class="card fail"><label>失败</label><b id="failCount">—</b></div>
+    <div class="card"><label>用例总数</label><b id="totalCount">—</b></div>
+    <div class="card time"><label>执行耗时</label><b id="timeBox">—</b></div>
+  </div>
+
+  <div class="rules">
+    <strong>判定口径：</strong>程序 X/Z 是刀尖圆心轨迹（G41/G42 已移除，出现时忽略并警告）。实际工件轮廓 = 程序轨迹向材料侧等距偏移刀尖半径 R（直线平移 R、内凹圆弧 R+r、外凸圆弧 R−r、程序凹拐角留下半径 R 的包络弧）。测量基准仅取实际工件轮廓的特征端点与相邻交点。<br>
+    <strong>补偿一致性：</strong>实际轮廓各采样点到程序（刀心）轨迹的最近距离应恒等于刀尖半径 R，偏差 ≤0.002 mm，任一超差即判不匹配。
+  </div>
+
+  <div id="list"></div>
+  <p class="foot">测试直接调用 Geometry / ProgramParser / ContourSimulator，与主应用使用同一套内核。</p>
+</div>
+
+<script src="js/geometry.js"></script>
+<script src="js/parser.js"></script>
+<script src="js/simulator.js"></script>
+<script src="js/samples.js"></script>
+<script src="js/viewer.js"></script>
+<script src="js/selftest.js"></script>
+<script>
+(function () {
+  var t0 = performance.now();
+  var rows = SelfTest.run();
+  var t1 = performance.now();
+  var pass = rows.filter(function (r) { return r.pass; }).length;
+  var fail = rows.length - pass;
+  document.getElementById('passCount').textContent = pass;
+  document.getElementById('failCount').textContent = fail;
+  document.getElementById('totalCount').textContent = rows.length;
+  document.getElementById('timeBox').textContent = (t1 - t0).toFixed(1) + ' ms';
+
+  var list = document.getElementById('list');
+  var lastGroup = '';
+  rows.forEach(function (r) {
+    if (r.group !== lastGroup) {
+      lastGroup = r.group;
+      var h = document.createElement('div');
+      h.className = 'group-title';
+      h.textContent = r.group;
+      list.appendChild(h);
+    }
+    var el = document.createElement('div');
+    el.className = 'test' + (r.pass ? '' : ' failrow');
+    el.innerHTML =
+      '<span class="badge ' + (r.pass ? 'pass' : 'fail') + '">' + (r.pass ? 'PASS' : 'FAIL') + '</span>' +
+      '<div><div class="name">' + escapeHtml(r.name) + '</div>' +
+      '<div class="detail">' + escapeHtml(r.detail) + '</div></div>' +
+      '<span class="detail">' + escapeHtml(r.group) + '</span>';
+    list.appendChild(el);
+  });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+})();
+</script>
+</body>
+</html>

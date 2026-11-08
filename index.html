@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#070d17">
+  <meta name="description" content="发那科数控车削轮廓计算与双向联调工具">
+  <title>天海数控车 · FANUC</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="appbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M6 21h20M9 21v-9h14v9M13 12v-3h6v3" /><circle cx="23" cy="8" r="2.2"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1>天海数控车</h1>
+          <span>FANUC TURNING PROFILER</span>
+        </div>
+      </div>
+      <div class="appbar-status">
+        <span class="chip chip-mint" id="chipCoverage">识别 --</span>
+        <span class="chip" id="chipComp">无刀补</span>
+        <button class="icon-btn ghost" id="btnHelp" aria-label="说明">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.4 2.4 0 1 1 3.6 2.2c-.9.6-1.2 1-1.2 2.1"/><circle cx="12" cy="16.8" r=".8"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="views">
+      <!-- ================= 轮廓 ================= -->
+      <section class="view is-active" id="view-contour">
+        <div class="canvas-top">
+          <div class="mode-switch" id="modeSwitch" role="tablist">
+            <button data-mode="measure" class="is-on">
+              <svg viewBox="0 0 24 24"><path d="M4 17 17 4l3 3L7 20H4z"/><path d="m13 8 3 3"/></svg>
+              测量
+            </button>
+            <button data-mode="edit">
+              <svg viewBox="0 0 24 24"><path d="M5 19h4l9-9-4-4-9 9z"/><path d="M14 6.5 17.5 10"/></svg>
+              编辑
+            </button>
+            <button data-mode="pan">
+              <svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10M12 10V4.5a1.5 1.5 0 0 1 3 0V10M15 11V6.5a1.5 1.5 0 0 1 3 0V14c0 4-2.5 7-6 7-2.2 0-3.4-1-4.6-2.3L5 13.5a1.7 1.7 0 0 1 2.4-2.2L9 13"/></svg>
+              浏览
+            </button>
+          </div>
+          <div class="canvas-actions">
+            <button class="icon-btn" id="btnGuideV" aria-label="铅垂线" title="铅垂线（等 Z 辅助线）">
+              <svg viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M7 8h10"/><path d="M7 16h10"/></svg>
+            </button>
+            <button class="icon-btn" id="btnGuideH" aria-label="水平线" title="水平线（等 X 辅助线）">
+              <svg viewBox="0 0 24 24"><path d="M3 12h18"/><path d="M8 7v10"/><path d="M16 7v10"/></svg>
+            </button>
+            <button class="icon-btn" id="btnGuideClear" aria-label="清除辅助线" title="清除辅助线">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6.5 7l1 13h9l1-13"/></svg>
+            </button>
+            <button class="icon-btn" id="btnLayers" aria-label="图层">
+              <svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>
+            </button>
+            <button class="icon-btn" id="btnFit" aria-label="适应屏幕">
+              <svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="stage" id="stage">
+          <svg id="svg" role="img" aria-label="工件轮廓视图"></svg>
+
+          <div class="stage-legend" id="legend">
+            <span><i class="dot dot-actual"></i>实际工件轮廓</span>
+            <span><i class="dot dot-nominal"></i>程序轨迹（刀尖圆心）</span>
+            <span><i class="dot dot-stock"></i>毛坯</span>
+            <span><i class="dot dot-base"></i>测量基准</span>
+            <span><i class="dot dot-guide"></i>辅助线 / 交点</span>
+          </div>
+
+          <div class="stage-empty" id="emptyState">
+            <div class="empty-icon">
+              <svg viewBox="0 0 48 48"><path d="M8 30h32M10 30V18h28v12M15 18v-5h18v5"/><circle cx="35" cy="10" r="3"/></svg>
+            </div>
+            <h3>等待有效轮廓</h3>
+            <p>在“程序”页输入或载入 FANUC 车削程序，然后点击应用。</p>
+            <button class="btn small" id="btnGoProgram">去输入程序</button>
+          </div>
+
+          <div class="zoom-rail">
+            <button class="zoom-btn" id="btnZoomIn" aria-label="放大">+</button>
+            <div class="zoom-readout" id="zoomReadout">--</div>
+            <button class="zoom-btn" id="btnZoomOut" aria-label="缩小">−</button>
+          </div>
+
+          <div class="layers-pop" id="layersPop">
+            <div class="pop-head">显示图层</div>
+            <label class="switch-row"><span>程序轨迹</span><input type="checkbox" id="tgNominal" checked><i></i></label>
+            <label class="switch-row"><span>毛坯边界</span><input type="checkbox" id="tgStock" checked><i></i></label>
+            <label class="switch-row"><span>偏差指示</span><input type="checkbox" id="tgDeviation" checked><i></i></label>
+            <label class="switch-row"><span>网格标尺</span><input type="checkbox" id="tgGrid" checked><i></i></label>
+            <label class="switch-row"><span>卡盘夹持</span><input type="checkbox" id="tgChuck" checked><i></i></label>
+          </div>
+
+          <div class="stage-hint" id="stageHint">点选实际轮廓特征端点 / 交点作为测量基准</div>
+        </div>
+
+        <div class="sheet" id="sheet" aria-live="polite"></div>
+      </section>
+
+      <!-- ================= 程序 ================= -->
+      <section class="view" id="view-program">
+        <div class="page-head">
+          <div>
+            <h2>数控程序</h2>
+            <p>FANUC 车削 G 代码 · 实时解析</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn primary" id="btnApply">
+              <svg viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7"/></svg>
+              应用
+            </button>
+          </div>
+        </div>
+
+        <div class="program-tools">
+          <div class="select-wrap">
+            <select id="sampleSelect" aria-label="载入示例">
+              <option value="">载入示例程序…</option>
+              <option value="sample1">示例 1 · 外圆圆弧台阶</option>
+              <option value="sample2">示例 2 · G71/G70 粗精车</option>
+              <option value="sample3">示例 3 · 内孔镗削</option>
+              <option value="sample4">示例 4 · 切槽与刀宽</option>
+              <option value="sample5">示例 5 ·  扩展</option>
+              <option value="sample6">示例 6 · 扩展2</option>
+            </select>
+            <svg class="select-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
+          </div>
+          <span class="pill" id="programStats">0 行</span>
+        </div>
+
+        <div class="editor-card">
+          <div class="gutter" id="gutter"></div>
+          <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="G代码编辑器"></textarea>
+        </div>
+
+        <div class="quickkeys" id="quickKeys">
+          <button data-ins="G00 ">G00</button>
+          <button data-ins="G01 ">G01</button>
+          <button data-ins="G02 ">G02</button>
+          <button data-ins="G03 ">G03</button>
+          <button data-ins="G71 ">G71</button>
+          <button data-ins="G70 ">G70</button>
+          <button data-ins="G75 ">G75</button>
+          <button data-ins="G76 ">G76</button>
+          <button data-ins="U">U</button>
+          <button data-ins="W">W</button>
+          <button data-ins="A">A</button>
+          <button data-ins="C">C</button>
+          <button data-ins="R">R</button>
+          <button data-ins="M03 ">M03</button>
+          <button data-ins="M30">M30</button>
+        </div>
+
+        <div class="card diag-card">
+          <div class="card-head">
+            <h3>解析诊断</h3>
+            <span class="pill" id="diagCount">--</span>
+          </div>
+          <div class="diag-list" id="diagList"></div>
+        </div>
+
+        <div class="callout">
+          <strong>识别范围</strong>
+          G00/G01/G02/G03、G04、G20/G21、G28/G30、G32、G50、G70/G71/G72/G73、G74/G75/G76、G90/G91/G92/G94/G95/G96/G97 及 T/S/F/M 辅助指令。G01 支持 A 角度、C 倒角、R 拐角圆角与 U/W 增量编程。G40/G41/G42 刀尖补偿已移除，出现时忽略并提示；程序 X/Z 即工件轮廓。未知指令仅提示，不阻断轮廓计算。
+        </div>
+      </section>
+
+      <!-- ================= 刀具 ================= -->
+      <section class="view" id="view-tools">
+        <div class="page-head">
+          <div>
+            <h2>刀具参数</h2>
+            <p>刀尖圆弧、安装方位与补偿值</p>
+          </div>
+          <button class="btn ghost" id="btnAddTool">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            新增
+          </button>
+        </div>
+
+        <div class="tool-strip" id="toolStrip"></div>
+
+        <div class="card" id="toolParams"></div>
+
+        <div class="card stock-card">
+          <div class="card-head">
+            <h3>毛坯与显示</h3>
+            <span class="pill" id="stockState">--</span>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>毛坯直径 X (mm)</label>
+              <div class="num-input">
+                <button data-step="-1" data-target="stockDia">−</button>
+                <input id="stockDia" type="number" inputmode="decimal" step="0.1" min="1" max="400">
+                <button data-step="1" data-target="stockDia">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>显示精度</label>
+              <div class="readonly">0.001 mm</div>
+            </div>
+          </div>
+          <p class="hint">毛坯直径仅用于显示未加工边界，不参与程序坐标计算。</p>
+        </div>
+
+        <div class="callout">
+          程序 X/Z 为刀尖圆心轨迹（含 A 角度、C 倒角、R 圆角、U/W 增量）；实际工件轮廓由程序轨迹向材料侧偏移刀尖半径 R 实时生成（直线平移 R、内凹圆弧 R+r、外凸圆弧 R−r、程序凹拐角留下半径 R 的包络弧）。G41/G42 刀尖补偿指令已移除，程序中出现时将忽略并提示。刀库几何/磨损补偿（X 直径、Z 轴向）按输入值整体平移实际轮廓。
+        </div>
+      </section>
+    </main>
+
+    <nav class="tabbar" role="tablist">
+      <button class="tab is-on" data-view="contour">
+        <svg viewBox="0 0 24 24"><path d="M3 18h18M5 18V9h14v9"/><path d="M8 9V6h8v3"/></svg>
+        <span>轮廓</span>
+      </button>
+      <button class="tab" data-view="program">
+        <svg viewBox="0 0 24 24"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/></svg>
+        <span>程序</span>
+      </button>
+      <button class="tab" data-view="tools">
+        <svg viewBox="0 0 24 24"><path d="M14.5 5.5 18 9 9 18H5v-4z"/><path d="m13 7 4 4"/><circle cx="7" cy="7" r="2.4"/></svg>
+        <span>刀具</span>
+      </button>
+    </nav>
+  </div>
+
+  <div class="modal" id="modal">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h3>计算说明</h3>
+        <button class="icon-btn ghost" id="btnCloseModal" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p><strong>轮廓语义：</strong>程序 X/Z（含 A 角度、C 倒角、R 圆角、U/W 增量）是刀尖圆心轨迹。实际工件轮廓由程序轨迹向材料侧等距偏移刀尖圆弧半径 r 得到：直线沿法向平移 r，内凹圆弧 实际 R = 程序 R + r，外凸圆弧 实际 R = 程序 R − r，程序拐角的凹侧留下以拐点为圆心、半径 r 的包络圆弧。G41/G42 刀尖补偿功能已移除，程序中出现时忽略并警告。</p>
+        <p><strong>G01 扩展：</strong>A 为自 -Z 轴起算的角度（真实半径平面），可由 X/U 或 Z/W 之一推算另一坐标；C 为段末等长倒角，R 为段末相切圆角；U、W 分别为 X（直径）、Z 的增量编程。C/R 只作用于本段末端与下一连续切削段的拐角。</p>
+        <p><strong>测量规范：</strong>基准节点取自实际工件轮廓（程序轨迹 + 刀尖半径补偿后）的特征端点与相邻特征交点，也可放置铅垂线 / 水平线辅助线并拾取辅助线与轮廓的交点；点击辅助线可直接输入数值（铅垂线为 Z，水平线为 X 直径）精确定位。仅允许选择上述节点，禁止在特征线上任意取点。辅助线为纯测量基准，不参与刀尖半径偏移。基准坐标即为实际工件轮廓的 X/Z；圆弧半径与圆心直接读取该基准点所属实际轮廓圆弧数据，不做曲线拟合。</p>
+        <p><strong>验证标准：</strong>①补偿一致性：实际轮廓各采样点到程序（刀心）轨迹的最近距离应恒等于刀尖半径 r，偏差 ≤0.002 mm，任一超差即判不匹配；②轮廓由程序轨迹向材料侧等距偏移 r 实时计算，内凹圆弧 R+r、外凸圆弧 R−r。测量读数 0.001 mm。</p>
+        <p><strong>坐标约定：</strong>X 为直径值，Z 为轴向值；图形按真实半径比例绘制，X 标尺显示直径。所有测量值保留 0.001 mm。</p>
+        <p><strong>双向联动：</strong>编辑模式点选特征后可修改终点直径、Z、圆弧 R 或 G02/G03 方向，程序对应程序段立即回写并重新计算；拖动线段端点可连续修改。</p>
+        <p><strong>说明：</strong>G74/G75/G76 等固定循环及螺纹牙型以识别和最终尺寸近似为主，具体加工请以机床实际参数与官方手册为准。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="pick-pop" id="pickPop"></div>
+
+  <div class="pick-pop guide-pop" id="guidePop">
+    <div class="pop-head" id="guidePopHead">辅助线数值</div>
+    <div class="guide-edit">
+      <label id="guideField" for="guideInput">Z (mm)</label>
+      <input id="guideInput" type="number" inputmode="decimal" step="0.001" autocomplete="off" spellcheck="false">
+      <div class="guide-btns">
+        <button class="btn small primary" id="btnGuideOk">确定</button>
+        <button class="btn small ghost" id="btnGuideDel">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/geometry.js"></script>
+  <script src="js/parser.js"></script>
+  <script src="js/simulator.js"></script>
+  <script src="js/samples.js"></script>
+  <script src="js/viewer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
