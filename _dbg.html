@@ -1,0 +1,63 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>dbg</title></head><body>
+<pre id="o"></pre>
+<script src="js/geometry.js"></script>
+<script src="js/parser.js"></script>
+<script src="js/simulator.js"></script>
+<script src="js/reverse.js"></script>
+<iframe id="f" style="display:none" src="/tests.html"></iframe>
+<script>
+(function(){
+  var o = document.getElementById('o');
+  function log(s){ o.textContent += s + '\n'; }
+  var done = 0;
+  function tryLoad() {
+    if (typeof window.ReverseContour !== 'undefined' && typeof window.Geometry !== 'undefined') { run(); return; }
+    setTimeout(tryLoad, 80);
+  }
+  tryLoad();
+  function run(){
+    // FAIL 1: JSON 混合直线圆弧
+    var r1 = ReverseContour.parseContour({
+      tool: { type: 'outer', radius: 0.8 },
+      contour: [
+        { point: [30, 0] },
+        { point: [30, -20] },
+        { arcCenter: [40, -30], cw: false, end: [50, -40] },
+        { point: [50, -50] }
+      ]
+    });
+    log('r1 feats=' + r1.feats.length + ' side=' + r1.side + ' tool=' + JSON.stringify(r1.tool));
+    r1.feats.forEach(function(f,i){ log('  ['+i+'] '+f.type+' start='+f.start.d+','+f.start.z+' end='+f.end.d+','+f.end.z+' c='+JSON.stringify(f.center)+' r='+f.radius+' cw='+f.cw); });
+
+    // FAIL 2: inner side
+    var r2 = ReverseContour.parseContour({ tool: { type: 'inner', radius: 0.4 }, contour: [{ point: [34, 0] }, { point: [34, -30] }, { point: [30, -40] }] });
+    log('r2 feats=' + r2.feats.length + ' side=' + r2.side + ' tool=' + JSON.stringify(r2.tool));
+
+    // runPipeline 报错
+    try {
+      var r3 = ReverseContour.runPipeline(JSON.stringify({
+        tool: { type: 'outer', radius: 0.8, toolNo: 1, name: '外圆刀' },
+        contour: [
+          { point: [30, 0] },
+          { point: [30, -10] },
+          { arcCenter: [40, -20], cw: false, end: [50, -30] },
+          { point: [50, -50] }
+        ]
+      }), { radius: 0.8 }, { programNo: 1008 });
+      log('pipeline feats=' + r3.programFeatures.length);
+      log('gcode head=' + r3.gcode.split('\n').slice(0,6).join(' | '));
+    } catch(e) { log('pipeline ERR ' + e.message); }
+
+    // envelope 测试
+    var src = 'G21\nG00 X30. Z2.\nG01 Z-10. F0.2\nG02 X50. Z-20. R10.\nM30';
+    var p = window.ProgramParser.parse(src, [{ id:'t1', toolNo:1, name:'外圆刀', type:'outer', radius:0.8, angle:55, tip:80, width:0, pitch:0, threadAngle:0, geoX:0, geoZ:0, wearX:0, wearZ:0 }], { activeToolId:'t1' });
+    var ch = window.Geometry.composeChain(p.cutting, { autoRadius:0 }).features;
+    log('program feats:');
+    ch.forEach(function(f){ log('  '+f.type+' s('+f.start.d+','+f.start.z+') e('+f.end.d+','+f.end.z+') c='+JSON.stringify(f.center)+' r='+f.radius+' cw='+f.cw); });
+    var offset = window.Geometry.offsetChain(ch, 0.8, 1).features;
+    log('offset feats:');
+    offset.forEach(function(f){ log('  '+f.type+' env='+!!f.envelope+' s('+f.start.d+','+f.start.z+') e('+f.end.d+','+f.end.z+') c='+JSON.stringify(f.center)+' r='+f.radius); });
+  }
+})();
+</script>
+</body></html>

@@ -54,6 +54,14 @@
   let guideSeq = 0;
   let guideEditId = null;
 
+  /* 逆向页面状态 */
+  const revState = {
+    lastPipeline: null,  // runPipeline 返回
+    debounceTimer: 0,
+    sourceText: null,    // 生成前的原始程序（已写回程序页后仍用它作为目标轮廓）
+    generatedText: null  // 最近一次写入程序页的生成程序
+  };
+
   const $ = function (id) { return document.getElementById(id); };
   const editor = $('editor');
   const gutter = $('gutter');
@@ -287,6 +295,10 @@
       renderToolParams();
     } else if (name === 'program') {
       updateGutter();
+    } else if (name === 'reverse') {
+      revRefreshToolSelect();
+      // 每次进入都按当前程序重新生成
+      revGenerate(true);
     }
     $('layersPop').classList.remove('show');
   }
@@ -1035,6 +1047,449 @@
     }, 600);
   }
 
+  /* ---------------- 逆向：当前程序 → 加工程序 ---------------- */
+
+  function revRefreshToolSelect() {
+    const sel = $('revToolSelect');
+    if (!sel) return;
+    sel.innerHTML = state.tools.map(function (t) {
+      return '<option value="' + t.id + '">T' + t.toolNo + ' ' + esc(t.name) + ' · R' + fmt(t.radius) + '</option>';
+    }).join('');
+    if (state.tools.some(function (t) { return t.id === state.activeToolId; })) {
+      sel.value = state.activeToolId;
+    }
+  }
+
+  /* 当前程序的切削段 → 目标工件轮廓特征链（程序路径即实际轮廓） */
+  function revSourceFeatures() {
+    // 程序页已被“生成程序”覆盖时，仍以覆盖前的原始程序作为目标轮廓，避免二次偏移
+    const reuseStored = revState.generatedText && revState.sourceText &&
+      state.program === revState.generatedText;
+    const srcParsed = reuseStored
+      ? global.ProgramParser.parse(revState.sourceText, state.tools, { activeToolId: state.activeToolId })
+      : parsed;
+    if (!srcParsed || !srcParsed.cutting) return { feats: [], error: '当前程序无法解析' };
+    const cut = srcParsed.cutting.filter(function (f) {
+      if (f.rapid) return false;
+      if (f.type === 'arc' && !f.center) return false;
+      return !(Math.abs(f.start.d - f.end.d) < 1e-4 && Math.abs(f.start.z - f.end.z) < 1e-4);
+    });
+    if (!cut.length) return { feats: [], error: '当前程序没有可用的切削路径' };
+    // 按端点连续性拆成若干条链，取总长最长的一条（避免把 G00 跳刀后的两段连成一条）
+    const chains = [];
+    cut.forEach(function (f) {
+      const last = chains.length ? chains[chains.length - 1] : null;
+      const prevEnd = last ? last.feats[last.feats.length - 1].end : null;
+      const cont = prevEnd && Math.hypot(f.start.d - prevEnd.d, f.start.z - prevEnd.z) < 1e-3;
+      if (cont) last.feats.push(f);
+      else chains.push({ feats: [f], len: 0 });
+    });
+    chains.forEach(function (c) {
+      c.len = c.feats.reduce(function (s, f) {
+        return s + Math.hypot(f.end.z - f.start.z, (f.end.d - f.start.d) / 2);
+      }, 0);
+    });
+    chains.sort(function (a, b) { return b.len - a.len; });
+    const composed = global.Geometry.composeChain(chains[0].feats, { autoRadius: 0 });
+    const feats = composed.features.map(function (f) {
+      const o = {
+        id: f.id, type: f.type,
+        start: f.start, end: f.end,
+        center: f.center || null,
+        radius: f.radius || 0,
+        cw: !!f.cw, rapid: false, offset: false
+      };
+      if (o.type === 'arc' && o.center && !(o.radius > 0)) {
+        o.radius = Math.hypot(o.end.d / 2 - o.center.r, o.end.z - o.center.z);
+      }
+      return o;
+    });
+    return { feats: feats, warnings: composed.warnings || [], error: null, reuseStored: !!reuseStored };
+  }
+
+  function revSourceSummary(src) {
+    if (!src.feats.length) {
+      return '<div class="rev-source-row"><span>' + esc(src.error || '无可用切削路径') + '</span></div>';
+    }
+    let lineCnt = 0, arcCnt = 0, minZ = Infinity, maxZ = -Infinity, maxD = 0;
+    src.feats.forEach(function (f) {
+      if (f.type === 'arc') arcCnt++; else lineCnt++;
+      minZ = Math.min(minZ, f.start.z, f.end.z);
+      maxZ = Math.max(maxZ, f.start.z, f.end.z);
+      maxD = Math.max(maxD, f.start.d, f.end.d);
+    });
+    return '<div class="rev-source-row"><span>切削段</span><b>' + src.feats.length + ' 段</b></div>' +
+      (src.reuseStored ? '<div class="rev-source-row"><span>来源</span><b>生成前的原始程序</b></div>' : '') +
+      '<div class="rev-source-row"><span>直线 / 圆弧</span><b>' + lineCnt + ' / ' + arcCnt + '</b></div>' +
+      '<div class="rev-source-row"><span>Z 范围</span><b>' + fmt(minZ) + ' ~ ' + fmt(maxZ) + '</b></div>' +
+      '<div class="rev-source-row"><span>最大直径</span><b>Ø' + fmt(maxD) + '</b></div>';
+  }
+
+  function revCollectTool() {
+    return {
+      radius: Math.max(0, parseFloat($('revRadius').value) || 0),
+      side: $('revSidePlus').classList.contains('is-on') ? 1 : -1,
+      toolNo: parseInt($('revToolNo').value, 10) || 1,
+      toolName: $('revToolName').value || '加工程序'
+    };
+  }
+
+  function revCollectGcodeOpts() {
+    return {
+      programNo: parseInt($('revProgNo').value, 10) || 1007,
+      units: 'mm',
+      spindle: parseInt($('revSpindle').value, 10) || 2500,
+      speed: parseFloat($('revSpeed').value) || 180,
+      feed: parseFloat($('revFeed').value) || 0.2,
+      coolant: $('revCoolantOn').classList.contains('is-on')
+    };
+  }
+
+  function revSetSide(side) {
+    $('revSidePlus').classList.toggle('is-on', side > 0);
+    $('revSideMinus').classList.toggle('is-on', side < 0);
+  }
+
+  /* 回代验证：生成程序按正向算法偏移后，与实际轮廓比较（包络弧除外） */
+  function revVerify(targetFeats, progFeats, r, side) {
+    if (!targetFeats.length) return { maxDev: 0, envCount: 0, ok: true };
+    const back = global.Geometry.offsetChain(progFeats, r, side);
+    const used = back.features.filter(function (f) { return !f.envelope; });
+    if (!used.length) return { maxDev: 0, envCount: 0, ok: true };
+    const ref = [];
+    targetFeats.forEach(function (f) {
+      global.Geometry.sampleFeature(f, 0.02).forEach(function (p) { ref.push(p); });
+    });
+    let maxDev = 0;
+    used.forEach(function (f) {
+      global.Geometry.sampleFeature(f, 0.05).forEach(function (p) {
+        const hit = global.Geometry.nearestOnPolyline(ref, p);
+        if (hit && hit.distance > maxDev) maxDev = hit.distance;
+      });
+    });
+    const envCount = back.features.length - used.length;
+    return { maxDev: maxDev, envCount: envCount, ok: maxDev <= 0.01 };
+  }
+
+  /* 逆向主流程：当前程序 → 目标轮廓 → 刀心轨迹 → G 代码 */
+  function revGenerate(silent) {
+    const src = revSourceFeatures();
+    $('revSourceInfo').innerHTML = revSourceSummary(src);
+    if (src.error || !src.feats.length) {
+      if (!silent) toast(src.error || '当前程序没有可用的切削路径');
+      $('revPreviewState').textContent = '无可用轮廓';
+      $('revPreviewState').className = 'pill warn';
+      return false;
+    }
+
+    const toolOpts = revCollectTool();
+    const r = toolOpts.radius;
+    const side = toolOpts.side;
+    let prog, gcode, verify;
+    try {
+      prog = global.ReverseContour.reverseContour(src.feats, r, side).features;
+      let maxD = 0, maxZ = -Infinity;
+      prog.forEach(function (f) {
+        maxD = Math.max(maxD, f.start.d, f.end.d);
+        maxZ = Math.max(maxZ, f.start.z, f.end.z);
+      });
+      const gcodeOpts = revCollectGcodeOpts();
+      gcodeOpts.toolNo = toolOpts.toolNo;
+      gcodeOpts.toolName = toolOpts.toolName;
+      gcodeOpts.startD = maxD + 4;
+      gcodeOpts.startZ = Math.max(maxZ, 0) + 2;
+      gcodeOpts.safetyD = maxD + 6;
+      gcodeOpts.safetyZ = gcodeOpts.startZ;
+      gcodeOpts.retractEnd = true;
+      gcode = global.ReverseContour.generateGcode(prog, gcodeOpts);
+      verify = revVerify(src.feats, prog, r, side);
+    } catch (e) {
+      toast('生成失败：' + e.message);
+      $('revPreviewState').textContent = '生成失败';
+      $('revPreviewState').className = 'pill warn';
+      return false;
+    }
+
+    if (!src.reuseStored) revState.sourceText = state.program;
+    revState.generatedText = gcode;
+    revState.lastPipeline = { source: src, programFeatures: prog, gcode: gcode, verify: verify, toolOpts: toolOpts };
+
+    $('revGcodeOutput').value = gcode;
+    $('revGcodeStats').textContent = gcode.split('\n').length + ' 行 · ' + prog.length + ' 段';
+    revDrawPreview(src.feats, prog);
+
+    const msgs = (src.warnings || []).slice();
+    if (!verify.ok) msgs.push('回代偏差 ' + fmt(verify.maxDev) + ' mm，超过 0.01 mm，请检查轮廓是否连续。');
+    if (verify.envCount) msgs.push('检测到 ' + verify.envCount + ' 处尖角包络弧（半径 R' + fmt(r) + '），属正常现象。');
+    revShowDiag(msgs);
+
+    $('revPreviewState').textContent = '已生成 · 回代偏差 ' + fmt(verify.maxDev) + ' mm';
+    $('revPreviewState').className = 'pill ' + (verify.ok ? 'good' : 'warn');
+    if (!silent) toast('已生成 ' + prog.length + ' 段程序');
+    return true;
+  }
+
+  function revShowDiag(msgs) {
+    const card = $('revDiagCard');
+    if (!msgs.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    $('revDiagList').innerHTML = msgs.map(function (w) {
+      return '<div class="diag-item warn"><span class="ln">!</span><span>' + esc(w) + '</span></div>';
+    }).join('');
+  }
+
+  function revScheduleGenerate() {
+    clearTimeout(revState.debounceTimer);
+    revState.debounceTimer = setTimeout(function () {
+      revGenerate(true);
+    }, 350);
+  }
+
+  /* 绘制 SVG 预览：实际轮廓（绿）+ 逆向程序轨迹（蓝虚线） */
+  function revDrawPreview(actualFeats, progFeats) {
+    const svg = $('revPreviewSvg');
+    const W = 400, H = 240;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+    // 收集所有端点做 bounds
+    const allPts = [];
+    function collect(feats) {
+      if (!feats) return;
+      feats.forEach(function (f) {
+        if (f.start) allPts.push({ d: f.start.d, z: f.start.z });
+        if (f.end) allPts.push({ d: f.end.d, z: f.end.z });
+        if (f.center) allPts.push({ d: f.center.r * 2, z: f.center.z });
+      });
+    }
+    collect(actualFeats);
+    collect(progFeats);
+
+    if (!allPts.length) {
+      svg.innerHTML = '<text x="' + (W/2) + '" y="' + (H/2) + '" fill="#5e718b" font-size="12" text-anchor="middle">暂无数据</text>';
+      return;
+    }
+
+    // 留边距
+    let minD = Infinity, maxD = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    allPts.forEach(function (p) {
+      minD = Math.min(minD, p.d); maxD = Math.max(maxD, p.d);
+      minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+    });
+    const padD = Math.max(4, (maxD - minD) * 0.12);
+    const padZ = Math.max(4, (maxZ - minZ) * 0.12);
+    minD -= padD; maxD += padD;
+    minZ -= padZ; maxZ += padZ;
+    // X 轴为直径，映射到真实半径比例：X 方向是半径差/2，Z 方向是轴向
+    // 在 SVG 中：水平方向画 Z（轴向），垂直方向画半径（D/2），上下翻转使负 Z 在下
+    const spanZ = maxZ - minZ || 1;
+    const spanR = (maxD - minD) / 2 || 1;
+    const marginL = 28, marginR = 14, marginT = 14, marginB = 20;
+    const plotW = W - marginL - marginR;
+    const plotH = H - marginT - marginB;
+    const scale = Math.min(plotW / spanZ, plotH / spanR);
+    const offsetZ = (plotW - spanZ * scale) / 2;
+    const offsetR = (plotH - spanR * scale) / 2;
+
+    const xOfZ = function (z) { return marginL + offsetZ + (z - minZ) * scale; };
+    const yOfD = function (d) { return marginT + offsetR + spanR * scale - ((d / 2) - minD / 2) * scale; };
+
+    // 画网格
+    let grid = '';
+    const zStep = niceStep(spanZ, 6);
+    const dStep = niceStep((maxD - minD), 6);
+    for (let z = Math.ceil(minZ / zStep) * zStep; z <= maxZ + 1e-6; z += zStep) {
+      const x = xOfZ(z);
+      grid += '<line class="rev-grid-line" x1="' + x.toFixed(1) + '" y1="' + marginT + '" x2="' + x.toFixed(1) + '" y2="' + (marginT + plotH) + '"/>';
+    }
+    for (let d = Math.ceil(minD / dStep) * dStep; d <= maxD + 1e-6; d += dStep) {
+      const y = yOfD(d);
+      grid += '<line class="rev-grid-line" x1="' + marginL + '" y1="' + y.toFixed(1) + '" x2="' + (marginL + plotW) + '" y2="' + y.toFixed(1) + '"/>';
+    }
+    // 画轴线（Z=0 或 D=0）
+    let axis = '';
+    if (minZ < 0 && maxZ >= 0) {
+      const x = xOfZ(0);
+      axis += '<line class="rev-axis-line" x1="' + x.toFixed(1) + '" y1="' + marginT + '" x2="' + x.toFixed(1) + '" y2="' + (marginT + plotH) + '"/>';
+    }
+    if (minD < 0 && maxD >= 0) {
+      const y = yOfD(0);
+      axis += '<line class="rev-axis-line" x1="' + marginL + '" y1="' + y.toFixed(1) + '" x2="' + (marginL + plotW) + '" y2="' + y.toFixed(1) + '"/>';
+    }
+
+    svg.innerHTML = grid + axis +
+      revRenderFeats(actualFeats, xOfZ, yOfD, 'actual') +
+      revRenderFeats(progFeats, xOfZ, yOfD, 'nominal');
+
+    function niceStep(range, targetDiv) {
+      const raw = range / targetDiv;
+      const exp = Math.pow(10, Math.floor(Math.log10(raw)));
+      const f = raw / exp;
+      let nf;
+      if (f < 1.5) nf = 1; else if (f < 3.5) nf = 2; else if (f < 7.5) nf = 5; else nf = 10;
+      return nf * exp;
+    }
+  }
+
+  function revRenderFeats(feats, xOfZ, yOfD, cls) {
+    if (!feats || !feats.length) return '';
+    let out = '';
+    feats.forEach(function (f) {
+      const x1 = xOfZ(f.start.z), y1 = yOfD(f.start.d);
+      const x2 = xOfZ(f.end.z), y2 = yOfD(f.end.d);
+      if (f.type === 'arc' && f.center) {
+        // 圆弧 SVG：计算 sweep flag 和 large arc flag
+        const cx = xOfZ(f.center.z), cy = yOfD(f.center.r * 2);
+        const r = Math.hypot(x1 - cx, y1 - cy);
+        const sweep = f.cw ? 0 : 1;  // SVG y 轴翻转后，方向取反
+        // large-arc-flag：计算扫过角度
+        const ang1 = Math.atan2(y1 - cy, x1 - cx);
+        const ang2 = Math.atan2(y2 - cy, x2 - cx);
+        let delta = ang2 - ang1;
+        if (delta > Math.PI) delta -= 2 * Math.PI;
+        if (delta < -Math.PI) delta += 2 * Math.PI;
+        // 调整：cw 时 delta 应为负（SVG 翻转坐标系后）
+        const largeArc = Math.abs(delta) > Math.PI ? 1 : 0;
+        out += '<path class="rev-arc-' + cls + '" d="M' + x1.toFixed(2) + ',' + y1.toFixed(2) +
+          ' A' + r.toFixed(2) + ',' + r.toFixed(2) + ' 0 ' + largeArc + ' ' + sweep +
+          ' ' + x2.toFixed(2) + ',' + y2.toFixed(2) + '"/>';
+      } else {
+        out += '<line class="rev-line-' + cls + '" x1="' + x1.toFixed(2) + '" y1="' + y1.toFixed(2) +
+          '" x2="' + x2.toFixed(2) + '" y2="' + y2.toFixed(2) + '"/>';
+      }
+      // 端点
+      out += '<circle class="rev-pt-' + cls + '" cx="' + x2.toFixed(2) + '" cy="' + y2.toFixed(2) + '" r="3"/>';
+    });
+    // 起点
+    const f0 = feats[0];
+    if (f0 && f0.start) {
+      out = '<circle class="rev-pt-' + cls + '" cx="' + xOfZ(f0.start.z).toFixed(2) +
+        '" cy="' + yOfD(f0.start.d).toFixed(2) + '" r="3"/>' + out;
+    }
+    return out;
+  }
+
+  /* ---------------- 逆向事件绑定 ---------------- */
+  function bindReverse() {
+    // 使用说明弹窗
+    const revHelp = $('revHelpModal');
+    $('btnRevHelp').addEventListener('click', function () { revHelp.classList.add('show'); });
+    $('btnRevHelpClose').addEventListener('click', function () { revHelp.classList.remove('show'); });
+    revHelp.addEventListener('click', function (e) {
+      if (e.target === revHelp) revHelp.classList.remove('show');
+    });
+    revHelp.querySelectorAll('.doc-toc a').forEach(function (a) {
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        const target = revHelp.querySelector(a.getAttribute('href'));
+        const card = revHelp.querySelector('.modal-card');
+        if (!target || !card) return;
+        const top = target.getBoundingClientRect().top - card.getBoundingClientRect().top + card.scrollTop - 46;
+        card.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+      });
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && revHelp.classList.contains('show')) revHelp.classList.remove('show');
+    });
+
+    // 刀具选择 → 同步 R / 刀号 / 方向
+    $('revToolSelect').addEventListener('change', function () {
+      const t = state.tools.find(function (x) { return x.id === $('revToolSelect').value; });
+      if (!t) return;
+      $('revRadius').value = fmt(t.radius);
+      $('revToolNo').value = t.toolNo;
+      $('revToolName').value = t.name;
+      revSetSide(t.type === 'inner' ? -1 : 1);
+      revScheduleGenerate();
+    });
+
+    // side 切换
+    $('revSidePlus').addEventListener('click', function () { revSetSide(+1); revScheduleGenerate(); });
+    $('revSideMinus').addEventListener('click', function () { revSetSide(-1); revScheduleGenerate(); });
+
+    // 切削液
+    $('revCoolantOff').addEventListener('click', function () { $('revCoolantOff').classList.add('is-on'); $('revCoolantOn').classList.remove('is-on'); revScheduleGenerate(); });
+    $('revCoolantOn').addEventListener('click', function () { $('revCoolantOn').classList.add('is-on'); $('revCoolantOff').classList.remove('is-on'); revScheduleGenerate(); });
+
+    // 数值 / 文本输入
+    document.querySelectorAll('#view-reverse input[type=number], #view-reverse input[type=text]').forEach(function (el) {
+      el.addEventListener('change', revScheduleGenerate);
+    });
+
+    // 刀尖半径 step 按钮
+    document.querySelectorAll('[data-rev-step]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const el = $(btn.getAttribute('data-target'));
+        const delta = Number(btn.getAttribute('data-rev-step')) * 0.05;
+        el.value = fmt(Math.min(3, Math.max(0, (parseFloat(el.value) || 0) + delta)));
+        revScheduleGenerate();
+      });
+    });
+
+    // 重新读取当前程序
+    $('revReload').addEventListener('click', function () {
+      revRefreshToolSelect();
+      revGenerate(false);
+    });
+
+    // 主生成按钮：生成并直接写入程序页
+    $('btnRevGenerate').addEventListener('click', function () {
+      if (revGenerate(false)) revApplyCurrent(true);
+    });
+
+    // 复制 G 代码
+    $('revBtnCopy').addEventListener('click', function () {
+      const text = $('revGcodeOutput').value;
+      if (!text) { toast('暂无 G 代码'); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { toast('已复制到剪贴板'); });
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); toast('已复制到剪贴板'); } catch (e) { toast('复制失败'); }
+        document.body.removeChild(ta);
+      }
+    });
+
+    // 下载 .nc
+    $('revBtnDownload').addEventListener('click', function () {
+      const text = $('revGcodeOutput').value;
+      if (!text) { toast('暂无 G 代码'); return; }
+      const progNo = $('revProgNo').value || '1007';
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'O' + progNo + '.nc';
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('已导出 O' + progNo + '.nc');
+    });
+
+    // 替换当前程序（生成后自动写入时无需再点，保留用于手动重新写入）
+    $('revBtnApply').addEventListener('click', function () { revApplyCurrent(false); });
+  }
+
+  /* 把生成的 G 代码写入“程序”页；stayHere=true 时停留在逆向页 */
+  function revApplyCurrent(stayHere) {
+    const text = $('revGcodeOutput').value;
+    if (!text) { toast('暂无 G 代码可替换'); return false; }
+    state.program = text;
+    editor.value = text;
+    state.measurements = [];
+    viewer.setMeasurements([]);
+    rebuild({ fit: true });
+    saveState();
+    if (stayHere) {
+      toast('已生成并写入程序页 · ' + (parsed ? parsed.stats.segments : 0) + ' 段');
+    } else {
+      hideSheet();
+      setView('program');
+      toast('已替换当前程序 · ' + (parsed ? parsed.stats.segments : 0) + ' 段切削');
+    }
+    return true;
+  }
+
   /* ---------------- 初始化 ---------------- */
   function init() {
     loadState();
@@ -1052,6 +1507,7 @@
     updateGuideUI();
 
     bind();
+    bindReverse();
     renderTools();
     renderToolParams();
     rebuild({ fit: true });

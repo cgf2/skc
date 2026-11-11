@@ -1,0 +1,29 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>run</title></head><body>
+<pre id="o"></pre>
+<iframe id="f" style="width:100%;height:800px;border:0"></iframe>
+<script>
+(function(){
+  var o = document.getElementById('o');
+  var f = document.getElementById('f');
+  f.addEventListener('load', function(){
+    setTimeout(function(){
+      var d = f.contentDocument;
+      var p = d.getElementById('passCount').textContent;
+      var fl = d.getElementById('failCount').textContent;
+      var t = d.getElementById('totalCount').textContent;
+      var tm = d.getElementById('timeBox').textContent;
+      var fb = d.querySelectorAll('.badge.fail');
+      var lines = ['PASS=' + p, 'FAIL=' + fl, 'TOTAL=' + t, 'TIME=' + tm];
+      for (var i = 0; i < fb.length; i++) {
+        var row = fb[i].closest('.test');
+        var nm = row.querySelector('.name').textContent;
+        var det = row.querySelector('.detail').textContent;
+        lines.push('FAIL [' + nm + '] ' + det);
+      }
+      o.textContent = lines.join('\n');
+    }, 18000);
+  });
+  f.src = 'http://127.0.0.1:8777/tests.html';
+})();
+</script>
+</body></html>

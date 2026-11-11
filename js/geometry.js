@@ -707,12 +707,14 @@
     };
   }
 
-  /* 交点是否落在偏移圆弧的有效扫掠范围内 */
+  /* 交点是否落在偏移圆弧的有效扫掠范围内（允许起点附近极小的反向越界） */
   function offsetArcAccepts(o, p) {
     if (o.kind !== 'arc') return true;
     const ang = Math.atan2(p.r - o.center.r, p.z - o.center.z);
-    const t = o.cw ? norm(o.a1 - ang) : norm(ang - o.a1);
-    return t <= o.sweep + 0.05;
+    let t = o.cw ? o.a1 - ang : ang - o.a1;
+    t = norm(t);
+    if (t > Math.PI) t -= TAU;   // 转成 [-π, π)，避免 359.7° 被误判为越界
+    return t >= -0.05 && t <= o.sweep + 0.05;
   }
 
   function offsetIntersection(o1, o2) {
@@ -736,6 +738,168 @@
     return best;
   }
 
+  /* 逆向偏移：从实际工件轮廓还原程序刀心轨迹。
+     与 offsetChain 相比的关键差异：
+       1) envelope 候选（radius ≈ r，或显式 envelope=true）是刀尖圆弧在程序凹拐角处留下的
+          包络弧，本身不属于程序轨迹——删除它，取其圆心 V 作为程序拐角拐点；
+       2) 对非 envelope 特征调用 offsetSampleGeom(f, r, -side) 完成逆向；
+       3) 相邻两个逆向特征端点分离时，沿切线延长取交点作为程序拐点；
+       4) 如果用户给的实际轮廓里**不含 envelope 弧**（简化输入），该函数也会在
+          cross*side<0 的位置推算出正确的程序拐点。 */
+  function reverseOffsetChain(feats, r, side) {
+    r = Math.abs(Number(r) || 0);
+    if (!(r > 1e-9)) {
+      return { features: feats.map(function (f) { return Object.assign({}, f); }), warnings: [] };
+    }
+    side = side < 0 ? -1 : 1;
+    const EPS = Math.max(0.003, r * 0.01);
+
+    // 1) 把 envelope 候选挑出来
+    const envIdx = {};
+    feats.forEach(function (f, i) {
+      if (f.type !== 'arc') return;
+      if (f.envelope === true) { envIdx[i] = true; return; }
+      if (Math.abs(f.radius - r) <= EPS) envIdx[i] = true;
+    });
+
+    // 2) 每个 envelope 候选：取其圆心 V，记录为前后两个相邻特征在程序侧的拐点
+    const programCorners = {};   // envIndex -> V
+    for (let i = 0; i < feats.length; i++) {
+      if (!envIdx[i]) continue;
+      const e = feats[i];
+      programCorners[i] = { z: e.center.z, r: e.center.r };
+    }
+
+    // 3) 对所有特征（含 envelope，后面会根据 envelope 删掉）做逆向 offsetSampleGeom
+    const reversed = feats.map(function (f, i) {
+      // 逆向用 -side，即正向用 side 从程序→实际，逆向用 -side 从实际→程序
+      const o = offsetSampleGeom(f, r, -side);
+      return { f: f, o: o, idx: i, isEnv: !!envIdx[i], srcId: f.id };
+    });
+
+    // 4) 构造程序特征链：跳过 envelope 候选，把它们的圆心塞到前后相邻特征之间
+    const outFeats = [];
+    const pendingCorners = [];  // 队列：待插入的 V 点（envelope 圆心）
+    for (let i = 0; i < reversed.length; i++) {
+      const item = reversed[i];
+      if (item.isEnv) {
+        // envelope 的圆心是程序拐点，排队插入
+        const V = programCorners[i];
+        if (V) pendingCorners.push({ V: V, at: 'before' });
+        continue;
+      }
+      // 处理当前特征的起点：可能被前面排队的 V 覆盖
+      const prevCorner = pendingCorners.shift();
+      if (prevCorner) {
+        item.o.start = { z: prevCorner.V.z, r: prevCorner.V.r };
+      }
+      // 如果这是第一个特征且队列里还有 V（不合逻辑），丢弃
+      outFeats.push(item);
+    }
+
+    // 6) 拐角处理
+    //    a. envelope 提供的 V 已把端点设好 → 已闭合
+    //    b. cross*side > 0（凹角）→ 两偏移特征求交，程序走尖角
+    //    c. cross*side < 0（凸角）→ 程序侧插入半径 r、圆心为轮廓拐点 V 的圆弧，
+    //       这样正向偏移回到轮廓时正好收成一个尖角
+    for (let i = 1; i < outFeats.length; i++) {
+      const prevItem = outFeats[i - 1];
+      const item = outFeats[i];
+      const A = prevItem.o;
+      const B = item.o;
+      const pA = pt(A.end.z, A.end.r);
+      const pB = pt(B.start.z, B.start.r);
+      if (dist(pA, pB) < 1e-4) continue;   // 已经闭合
+      const curA = prevItem.f;
+      const curB = item.f;
+      const t1 = tangentAt(curA, false), t2 = tangentAt(curB, true);
+      const cross = t1.z * t2.r - t1.r * t2.z;
+      if (Math.abs(cross) < 1e-7) {
+        // 共线：合并端点到中点
+        const m = pt((pA.z + pB.z) / 2, (pA.r + pB.r) / 2);
+        A.end = m; B.start = m; continue;
+      }
+      if (cross * side > 0) {
+        // 凹角：沿两逆向特征的方向延长求交
+        const p = offsetIntersection(A, B);
+        if (p) { A.end = p; B.start = p; continue; }
+      }
+      // 凸角：刀尖绕轮廓拐点摆动，程序侧为半径 r 的圆弧
+      const V = pt(curA.end.z, curA.end.d / 2);
+      const qA = tangentPointOn(A, V, r, A.end);
+      const qB = tangentPointOn(B, V, r, B.start);
+      if (qA && qB) {
+        A.end = qA;
+        B.start = qB;
+        // 拐角圆弧走短弧（凸角处刀尖绕拐点摆过的外角恒小于 π）
+        const a1 = Math.atan2(qA.r - V.r, qA.z - V.z);
+        const a2 = Math.atan2(qB.r - V.r, qB.z - V.z);
+        let cw = cross < 0;
+        let sw = cw ? norm(a1 - a2) : norm(a2 - a1);
+        if (sw > Math.PI) cw = !cw;
+        outFeats.splice(i, 0, {
+          f: { id: 'CR' + i, line: curA.line },
+          o: {
+            kind: 'arc', center: V, radius: r, cw: cw,
+            start: qA, end: qB,
+            a1: a1, a2: a2
+          },
+          idx: i,
+          srcId: 'CR' + i,
+          cornerArc: true
+        });
+        i++;
+        continue;
+      }
+      // 兜底：直接把两端点中点作连接（退化处理）
+      const m = pt((pA.z + pB.z) / 2, (pA.r + pB.r) / 2);
+      A.end = m; B.start = m;
+    }
+
+    /* 求偏移特征 o 上与「圆心 V、半径 r」圆弧相切的点（凸角过渡用） */
+    function tangentPointOn(o, V, r, near) {
+      if (o.kind === 'line') {
+        const dz = o.end.z - o.start.z;
+        const dr = o.end.r - o.start.r;
+        const len = Math.hypot(dz, dr);
+        if (len < 1e-9) return null;
+        const t = ((V.z - o.start.z) * dz + (V.r - o.start.r) * dr) / len;
+        const p = pt(o.start.z + dz / len * t, o.start.r + dr / len * t);
+        if (Math.abs(dist(p, V) - r) > Math.max(1e-3, r * 0.05)) return null;
+        return p;
+      }
+      const cands = circleCircle(o.center, o.radius, V, r);
+      let best = null, bd = Infinity;
+      cands.forEach(function (p) {
+        const dd = dist(p, near);
+        if (dd < bd) { bd = dd; best = p; }
+      });
+      return best;
+    }
+
+    // 7) 生成输出特征
+    const result = { features: [], warnings: [] };
+    outFeats.forEach(function (item, i) {
+      const o = item.o;
+      if (o.kind === 'arc' && o.radius < 0.002) {
+        result.warnings.push('逆向偏移后第 ' + (item.srcId || i + 1) + ' 行圆弧退化，请检查圆弧半径或刀尖半径。');
+      }
+      const f = {
+        id: item.srcId !== undefined ? item.srcId : 'P' + i,
+        type: o.kind,
+        start: { d: Math.max(0, o.start.r * 2), z: o.start.z },
+        end:   { d: Math.max(0, o.end.r   * 2), z: o.end.z },
+        center: o.kind === 'arc' ? o.center : null,
+        radius: o.kind === 'arc' ? o.radius : 0,
+        cw:    !!o.cw,
+        rapid: false,
+        offset: false
+      };
+      result.features.push(f);
+    });
+    return result;
+  }
+
   /* 生成偏移后的特征链；返回 { features, warnings } */
   function offsetChain(feats, r, side, opts) {
     opts = opts || {};
@@ -749,8 +913,14 @@
     side = side < 0 ? -1 : 1;
 
     const items = feats.map(function (f, i) {
-      const o = offsetSampleGeom(f, r, side);
-      if (o.kind === 'arc' && o.radius < 0.002) {
+      let o = offsetSampleGeom(f, r, side);
+      // 程序侧半径等于刀尖半径的拐角圆弧：正向偏移后收成一个点（工件尖角），不参与轮廓
+      const cornerCollapse = f.type === 'arc' &&
+        Math.abs(f.radius - r) <= Math.max(1e-3, r * 0.01);
+      if (cornerCollapse) {
+        const V = pt(f.center.z, f.center.r);
+        o = { kind: 'point', start: V, end: V };
+      } else if (o.kind === 'arc' && o.radius < 0.002) {
         result.warnings.push('刀尖半径 R' + r3(r) + ' 使第 ' + (f.line || i + 1) + ' 行圆弧偏移后退化，请检查圆弧半径。');
       }
       if (o.start.r < -1e-6 || o.end.r < -1e-6) {
@@ -763,9 +933,15 @@
     for (let i = 1; i < feats.length; i++) {
       const prev = feats[i - 1], cur = feats[i];
       if (dist(endOf(prev), startOf(cur)) > 1e-4) continue;
+      const A = items[i - 1].o, B = items[i].o;
+      // 拐角圆弧偏移后收成的点：前后两条轮廓直接在该点汇合
+      if (A.kind === 'point' || B.kind === 'point') {
+        const q = A.kind === 'point' ? A.start : B.start;
+        A.end = q; B.start = q;
+        continue;
+      }
       const t1 = tangentAt(prev, false), t2 = tangentAt(cur, true);
       const cross = t1.z * t2.r - t1.r * t2.z;
-      const A = items[i - 1].o, B = items[i].o;
       if (Math.abs(cross) < 1e-7) {
         const m = pt((A.end.z + B.start.z) / 2, (A.end.r + B.start.r) / 2);
         A.end = m; B.start = m;
@@ -815,6 +991,7 @@
 
     for (let i = 0; i < items.length; i++) {
       const src = items[i].src;
+      if (items[i].o.kind === 'point') continue;
       pushFeature(items[i].o, src, src.id !== undefined ? src.id : 'O' + i);
       const env = envelopes.find(function (e) { return e.idx === i + 1; });
       if (env) {
@@ -941,6 +1118,6 @@
     simplify, nearestOnPolyline, polylineLength, nearestFeature,
     featureLength, pointAtDist, arcParam, onFeature, filletSolve, chamferSolve,
     buildTreatment, trimFeature, composeChain, buildSnapNodes, distFromStart, distFromEnd,
-    guideIntersections
+    guideIntersections, reverseOffsetChain
   };
 })(window);

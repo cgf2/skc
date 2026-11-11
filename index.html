@@ -218,6 +218,158 @@
           程序 X/Z 为刀尖圆心轨迹（含 A 角度、C 倒角、R 圆角、U/W 增量）；实际工件轮廓由程序轨迹向材料侧偏移刀尖半径 R 实时生成（直线平移 R、内凹圆弧 R+r、外凸圆弧 R−r、程序凹拐角留下半径 R 的包络弧）。G41/G42 刀尖补偿指令已移除，程序中出现时将忽略并提示。刀库几何/磨损补偿（X 直径、Z 轴向）按输入值整体平移实际轮廓。
         </div>
       </section>
+
+      <!-- ================= 逆向 ================= -->
+      <section class="view" id="view-reverse">
+        <div class="page-head">
+          <div>
+            <h2>逆向 · 程序轮廓 → 加工程序</h2>
+            <p>把当前程序路径当作工件实际轮廓，按刀尖圆弧自动生成刀心加工程序</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn ghost" id="btnRevHelp">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.4 2.4 0 1 1 3.6 2.2c-.9.6-1.2 1-1.2 2.1"/><circle cx="12" cy="16.8" r=".8"/></svg>
+              使用说明
+            </button>
+            <button class="btn primary" id="btnRevGenerate">
+              <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13.3-6L20 8"/><path d="M20 4v4h-4"/></svg>
+              生成程序
+            </button>
+          </div>
+        </div>
+
+        <div class="rev-grid">
+          <!-- 左列：来源 + 刀具 + 参数 -->
+          <div class="rev-col">
+            <div class="card">
+              <div class="card-head">
+                <h3>① 轮廓来源</h3>
+                <span class="pill" id="revSourceState">当前程序</span>
+              </div>
+              <div class="rev-source" id="revSourceInfo">读取中…</div>
+              <p class="rev-source-tip">当前"程序"页里的 G 代码路径即目标工件轮廓，生成时会按刀尖圆弧 R 反推刀心轨迹。</p>
+              <button class="btn ghost rev-reload" id="revReload">
+                <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+                重新读取当前程序
+              </button>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3>② 刀具（刀尖圆弧）</h3></div>
+              <div class="field-grid">
+                <div class="field">
+                  <label>选择刀具</label>
+                  <div class="select-wrap">
+                    <select id="revToolSelect" aria-label="选择刀具"></select>
+                    <svg class="select-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>刀尖圆弧 R (mm)</label>
+                  <div class="num-input">
+                    <button data-rev-step="-1" data-target="revRadius">−</button>
+                    <input id="revRadius" type="number" inputmode="decimal" step="0.01" min="0" max="3" value="0.8">
+                    <button data-rev-step="1" data-target="revRadius">+</button>
+                  </div>
+                </div>
+                <div class="field wide">
+                  <label>加工方向</label>
+                  <div class="segmented-small">
+                    <button id="revSidePlus" class="is-on">外圆 (side +1)</button>
+                    <button id="revSideMinus">内孔 (side −1)</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>刀号 T</label>
+                  <input id="revToolNo" type="number" inputmode="numeric" step="1" min="1" max="99" value="1">
+                </div>
+                <div class="field">
+                  <label>刀具名称</label>
+                  <input id="revToolName" type="text" value="外圆精车刀">
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3>③ 生成参数</h3></div>
+              <div class="field-grid">
+                <div class="field">
+                  <label>程序号 O</label>
+                  <input id="revProgNo" type="number" inputmode="numeric" step="1" value="1007">
+                </div>
+                <div class="field">
+                  <label>进给 F (mm/r)</label>
+                  <input id="revFeed" type="number" inputmode="decimal" step="0.01" min="0.01" value="0.2">
+                </div>
+                <div class="field">
+                  <label>主轴 S (rpm)</label>
+                  <input id="revSpindle" type="number" inputmode="numeric" step="100" value="2500">
+                </div>
+                <div class="field">
+                  <label>恒线速 (m/min)</label>
+                  <input id="revSpeed" type="number" inputmode="numeric" step="10" value="180">
+                </div>
+                <div class="field wide">
+                  <label>切削液</label>
+                  <div class="segmented-small">
+                    <button id="revCoolantOff" class="is-on">关</button>
+                    <button id="revCoolantOn">M08</button>
+                  </div>
+                </div>
+              </div>
+              <p class="rev-source-tip">起刀点与安全退刀点按轮廓范围自动计算，无需填写。</p>
+            </div>
+          </div>
+
+          <!-- 右列：预览 + 结果 -->
+          <div class="rev-col">
+            <div class="card">
+              <div class="card-head">
+                <h3>轮廓预览</h3>
+                <span class="pill" id="revPreviewState">待生成</span>
+              </div>
+              <div class="rev-preview-wrap">
+                <svg id="revPreviewSvg" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid meet"></svg>
+                <div class="rev-preview-legend">
+                  <span><i class="dot dot-actual"></i>目标轮廓（当前程序）</span>
+                  <span><i class="dot dot-nominal"></i>生成程序刀心轨迹</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card rev-result">
+              <div class="card-head">
+                <h3>G 代码预览</h3>
+                <span class="pill" id="revGcodeStats">--</span>
+              </div>
+              <textarea id="revGcodeOutput" spellcheck="false" readonly aria-label="逆向生成的 G 代码"></textarea>
+              <div class="rev-actions">
+                <button class="btn ghost" id="revBtnCopy">
+                  <svg viewBox="0 0 24 24"><rect x="9" y="9" width="10" height="10" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+                  复制
+                </button>
+                <button class="btn ghost" id="revBtnDownload">
+                  <svg viewBox="0 0 24 24"><path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/></svg>
+                  导出 .nc
+                </button>
+                <button class="btn primary" id="revBtnApply">
+                  <svg viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7"/></svg>
+                  替换当前程序
+                </button>
+              </div>
+            </div>
+
+            <div class="card rev-diag" id="revDiagCard" style="display:none">
+              <div class="card-head"><h3>审计 / 警告</h3></div>
+              <div class="diag-list" id="revDiagList"></div>
+            </div>
+
+            <div class="callout">
+              <strong>回代验证：</strong>生成程序再经正向算法（刀心 + 刀尖 R）仿真得到实际轮廓，应与当前程序路径重合；仅凹拐角处会出现半径 R 的包络弧，属正常现象。
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <nav class="tabbar" role="tablist">
@@ -232,6 +384,10 @@
       <button class="tab" data-view="tools">
         <svg viewBox="0 0 24 24"><path d="M14.5 5.5 18 9 9 18H5v-4z"/><path d="m13 7 4 4"/><circle cx="7" cy="7" r="2.4"/></svg>
         <span>刀具</span>
+      </button>
+      <button class="tab" data-view="reverse">
+        <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13.3-6L20 8"/><path d="M20 4v4h-4"/><path d="M20 12a8 8 0 0 1-13.3 6L4 16"/><path d="M4 20v-4h4"/></svg>
+        <span>逆向</span>
       </button>
     </nav>
   </div>
@@ -256,6 +412,129 @@
     </div>
   </div>
 
+  <div class="modal" id="revHelpModal">
+    <div class="modal-card doc-card" role="dialog" aria-modal="true" aria-labelledby="revHelpTitle">
+      <div class="modal-head">
+        <h3 id="revHelpTitle">逆向模块 · 使用说明与参数配置</h3>
+        <button class="icon-btn ghost" id="btnRevHelpClose" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body doc-body">
+
+        <div class="doc-toc">
+          <strong>目录</strong>
+          <a href="#revDoc1">1 功能概述</a>
+          <a href="#revDoc2">2 轮廓来源</a>
+          <a href="#revDoc3">3 参数配置</a>
+          <a href="#revDoc4">4 操作步骤</a>
+          <a href="#revDoc5">5 回代验证</a>
+          <a href="#revDoc6">6 算法说明</a>
+          <a href="#revDoc7">7 常见问题</a>
+          <a href="#revDoc8">8 限制</a>
+        </div>
+
+        <h4 id="revDoc1">1 功能概述</h4>
+        <p>逆向模块把 <strong>“程序”页当前的 G 代码路径</strong> 直接当作 <strong>工件实际轮廓</strong>，再按刀尖圆弧半径 R 反推出 <strong>刀心轨迹</strong>，生成一份新的加工程序。新程序在机床上加工出的实际轮廓，就是您原来的程序路径。</p>
+        <div class="doc-flow">
+          <span class="doc-node">当前程序路径（=目标轮廓）</span>
+          <span class="doc-arrow">→ 反向等距偏移 R →</span>
+          <span class="doc-node">刀心轨迹</span>
+          <span class="doc-arrow">→ 后置处理 →</span>
+          <span class="doc-node">新加工程序</span>
+        </div>
+        <p>不需要再手工输入轮廓数据，也不需要写刀补指令；刀尖圆弧补偿由生成算法完成。</p>
+
+        <h4 id="revDoc2">2 轮廓来源</h4>
+        <ul class="doc-list">
+          <li>自动读取“程序”页的 G 代码，取其中 <code>G01 / G02 / G03</code> 切削段；<code>G00</code>、空走段、起点终点重合的段会被忽略。</li>
+          <li>程序里含有 A 角度、C 倒角、R 圆角、U/W 增量时，会先按正向解析规则展开，再作为目标轮廓。</li>
+          <li>存在多把刀或跳刀（G00 后再切削）时，按端点连续性拆链，取总长最长的一条连续链作为目标轮廓。</li>
+          <li>修改程序后，点 <strong>重新读取当前程序</strong> 或 <strong>生成程序</strong> 即可按新路径重算。</li>
+        </ul>
+
+        <h4 id="revDoc3">3 参数配置</h4>
+
+        <h5>3.1 刀具（刀尖圆弧）</h5>
+        <div class="doc-table-wrap">
+          <table class="doc-table">
+            <thead><tr><th>参数</th><th>作用</th><th>取值建议</th></tr></thead>
+            <tbody>
+              <tr><td>选择刀具</td><td>从刀库读取 R / 刀号 / 名称，并按类型自动设置方向</td><td>默认跟随当前刀具</td></tr>
+              <tr><td>刀尖圆弧 R</td><td>反向偏移量；R 越大，生成程序与目标轮廓的间距越大</td><td>必须与实际刀片一致，如 R0.4 / R0.8</td></tr>
+              <tr><td>加工方向</td><td>外圆 side +1（沿行进方向左偏）；内孔 side −1</td><td>外圆车削选 +1；内孔镗削选 −1</td></tr>
+              <tr><td>刀号 T / 名称</td><td>写入新程序 <code>T0101</code> 与程序头注释</td><td>与机床刀补号一致</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h5>3.2 生成参数</h5>
+        <div class="doc-table-wrap">
+          <table class="doc-table">
+            <thead><tr><th>参数</th><th>输出指令</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>程序号 O</td><td><code>O1007</code></td><td>同时作为导出文件名</td></tr>
+              <tr><td>进给 F</td><td><code>F…</code></td><td>每转进给 mm/r</td></tr>
+              <tr><td>主轴 S</td><td><code>G50 S…</code></td><td>最高转速限制</td></tr>
+              <tr><td>恒线速</td><td><code>G96 S… M03</code></td><td>切削线速度 m/min</td></tr>
+              <tr><td>切削液</td><td><code>M08</code></td><td>开启时输出</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="doc-note">起刀点与安全退刀点按生成轨迹范围自动计算（最大直径 +4 / +6，Z 最大 +2），无需填写；程序段号从 <code>N10</code> 起、步进 5，圆弧用 <code>I / K</code> 格式。</p>
+
+        <h4 id="revDoc4">4 操作步骤</h4>
+        <ol class="doc-steps">
+          <li>在“程序”页确认要作为轮廓的 G 代码（可直接编辑或载入示例）。</li>
+          <li>切换到 <strong>逆向</strong> 标签，模块自动读取并生成一次。</li>
+          <li>确认刀具：刀尖圆弧 R 与加工方向必须与实际一致。</li>
+          <li>按需修改程序号、进给、主轴、线速、切削液，稍候自动重算。</li>
+          <li>查看预览：<span class="doc-legend doc-legend-actual">绿色</span>为目标轮廓（当前程序路径），<span class="doc-legend doc-legend-nominal">蓝色虚线</span>为生成程序的刀心轨迹。</li>
+          <li>点 <strong>生成程序</strong>：生成结果会直接写入“程序”页，同时显示在 G 代码预览里；也可用 <strong>复制</strong> / <strong>导出 .nc</strong> 取走程序。</li>
+          <li>写入后再次进入逆向页，目标轮廓仍取写入前的原始程序，不会发生二次偏移。</li>
+        </ol>
+
+        <h4 id="revDoc5">5 回代验证</h4>
+        <ul class="doc-list">
+          <li>生成时自动做回代校验：把新程序按“刀心 + 刀尖 R”正向偏移，与目标轮廓逐点比较，偏差显示在预览卡右上角。</li>
+          <li>合格标准：≤ 0.01 mm。若超差，检查程序路径是否中断或不连续。</li>
+          <li>尖角处会出现半径 R 的 <strong>包络弧</strong>，这是刀尖圆弧的真实轨迹，不是误差。</li>
+          <li>整体偏移约 2R：加工方向选反；圆弧方向相反：检查原程序 G02/G03。</li>
+        </ul>
+
+        <h4 id="revDoc6">6 算法说明</h4>
+        <ul class="doc-list">
+          <li><strong>直线：</strong>目标轮廓沿法向偏移 R，得到刀心直线。</li>
+          <li><strong>圆弧：</strong>内凹时刀心 R = 轮廓 R − R<sub>刀</sub>；外凸时刀心 R = 轮廓 R + R<sub>刀</sub>。</li>
+          <li><strong>凹角（工件尖角）：</strong>两段刀心偏移线沿切向延长求交，交点即刀心拐点，加工后收成尖角。</li>
+          <li><strong>凸角（工件外露拐点）：</strong>插入一段以轮廓拐点为圆心、半径等于刀尖 R 的圆弧，刀尖绕拐点摆动，偏移后才精确还原尖角。</li>
+          <li><strong>包络弧：</strong>若目标轮廓含半径≈R 的包络弧，会识别为上一道工序的刀尖痕迹并折算成拐点。</li>
+        </ul>
+
+        <h4 id="revDoc7">7 常见问题</h4>
+        <div class="doc-table-wrap">
+          <table class="doc-table">
+            <thead><tr><th>现象</th><th>原因</th><th>处理</th></tr></thead>
+            <tbody>
+              <tr><td>提示“没有可用的切削路径”</td><td>当前程序只有 G00 或全部为空走</td><td>在程序页补上 G01/G02/G03 轮廓段</td></tr>
+              <tr><td>生成的程序坐标整体偏移约 2R</td><td>加工方向选反</td><td>外圆选 +1，内孔选 −1</td></tr>
+              <tr><td>回代偏差偏大</td><td>目标路径不连续，或相邻特征间距小于 2R</td><td>检查程序端点是否首尾相接</td></tr>
+              <tr><td>圆弧半径小于 R 报警</td><td>内凹处轮廓 R 必须大于刀尖 R</td><td>改用更小刀尖 R 或核对程序</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 id="revDoc8">8 限制</h4>
+        <ul class="doc-list">
+          <li>支持 X（直径）/ Z 两轴车削，输出逐段 G00 / G01 / G02 / G03，不生成 G71/G70 等复合循环。</li>
+          <li>取一条最长切削链；多工序多刀具的程序请分段处理。</li>
+          <li>程序中的 X/Z 为刀心坐标，导入机床前请核对刀补号与刀尖方位。</li>
+        </ul>
+
+      </div>
+    </div>
+  </div>
+
   <div class="pick-pop" id="pickPop"></div>
 
   <div class="pick-pop guide-pop" id="guidePop">
@@ -275,6 +554,7 @@
   <script src="js/geometry.js"></script>
   <script src="js/parser.js"></script>
   <script src="js/simulator.js"></script>
+  <script src="js/reverse.js"></script>
   <script src="js/samples.js"></script>
   <script src="js/viewer.js"></script>
   <script src="js/app.js"></script>

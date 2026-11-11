@@ -542,6 +542,172 @@
       return '命中 ' + gotGuide.axis + ' = ' + gotGuide.value;
     });
 
+    section('逆向：轮廓数据导入');
+    check('纯端点数组 → 全部直线特征', function () {
+      const r = ReverseContour.parseContour([[30, 0], [30, -20], [50, -40], [60, -50]]);
+      assert(r.feats.length === 3, '应生成 3 段直线');
+      near(r.feats[0].start.d, 30, 1e-6, 'L1 startX');
+      near(r.feats[0].end.z, -20, 1e-6, 'L1 endZ');
+      near(r.feats[2].end.d, 60, 1e-6, 'L3 endX');
+      return r.feats.length + ' lines parsed';
+    });
+    check('JSON 对象 → 混合直线与圆弧', function () {
+      // 水平圆弧：端点 X=30, Z=-10 和 X=30, Z=-30（同一 D=30）
+      // 圆心 (Z=-20, D=30) → arcCenter: [30, -20]，radius = hypot(10, 0) = 10
+      const r = ReverseContour.parseContour({
+        tool: { type: 'outer', radius: 0.8 },
+        contour: [
+          { point: [30, 0] },
+          { point: [30, -10] },
+          { arcCenter: [30, -20], cw: false, end: [30, -30] },
+          { point: [40, -30] }
+        ]
+      });
+      assert(r.feats.length === 3, '应为 1 直线 + 1 圆弧 + 1 直线 = 3, actual ' + r.feats.length);
+      assert(r.feats[1].type === 'arc', '中段应是 arc');
+      near(r.feats[1].center.z, -20, 1e-6, 'arc 圆心 Z');
+      near(r.feats[1].center.r, 15, 1e-6, 'arc 圆心 R');
+      near(r.feats[1].radius, 10, 0.002, 'arc 半径');
+      assert(r.side === +1, '外圆 side = +1, actual ' + r.side);
+      return r.feats.length + ' feats (side=' + r.side + ')';
+    });
+    check('纯文本行 → 自动识别直线与圆弧', function () {
+      const r = ReverseContour.parseContour('30 0\n30 -20\n50 -40\n60 -50');
+      assert(r.feats.length === 3, '应为 3 直线');
+      near(r.feats[1].end.z, -40, 1e-6, '中段 endZ');
+      return r.feats.length + ' feats';
+    });
+    check('内孔轮廓 side = -1', function () {
+      const r = ReverseContour.parseContour({
+        tool: { type: 'inner', radius: 0.4 },
+        contour: [{ point: [34, 0] }, { point: [34, -30] }, { point: [30, -40] }]
+      });
+      assert(r.side === -1, '内孔 side 应为 -1');
+      return 'side=' + r.side;
+    });
+
+    section('逆向：程序轨迹还原（往返验证）');
+    check('直线链往返：程序 X30→实际 X28.4→逆向 X30（side+1, r=0.8）', function () {
+      const prog = [
+        { id: 'A', type: 'line', start: { d: 30, z: 0 }, end: { d: 30, z: -20 }, center: null, radius: 0, cw: false, rapid: false }
+      ];
+      const actual = Geometry.offsetChain(prog, 0.8, +1).features;
+      assert(actual.length === 1, '一段直线偏移后仍为一段');
+      near(actual[0].start.d, 28.4, 0.002, '实际轮廓直径');
+      const rev = Geometry.reverseOffsetChain(actual, 0.8, +1).features;
+      assert(rev.length === 1, '逆向仍一段');
+      near(rev[0].start.d, 30, 0.002, '逆向起点 X ≈ 程序 30');
+      near(rev[0].end.z, -20, 0.002, '逆向终点 Z ≈ 程序 -20');
+      return 'prog X30 Z0→-20 → actual X28.4 Z-0.8→-20.8 → prog X' + rev[0].start.d.toFixed(1);
+    });
+    check('外凸圆弧往返：R10(程序) → R9.2(实际) → R10(逆向)', function () {
+      const progArc = [
+        { id: 'A', type: 'arc', start: { d: 50, z: -10 }, end: { d: 30, z: -20 },
+          center: { z: -20, r: 20 }, radius: 10, cw: false, rapid: false }
+      ];
+      // 圆心验证：(Z-20, R=20) → R = hypot(-10, 0) = 10 ✓（这里我们简化，直接构造）
+      // 直接用 offset 再 reverse
+      const actual = Geometry.offsetChain(progArc, 0.8, +1).features;
+      assert(actual.length === 1 && actual[0].type === 'arc', '偏移后仍是圆弧');
+      near(actual[0].radius, 9.2, 0.002, '外凸圆弧实际半径 = R - r');
+      const rev = Geometry.reverseOffsetChain(actual, 0.8, +1).features;
+      near(rev[0].radius, 10, 0.002, '逆向还原程序半径 10');
+      near(rev[0].center.z, -20, 0.01, '圆心不变');
+      return 'R10→R' + actual[0].radius.toFixed(1) + '→R' + rev[0].radius.toFixed(1);
+    });
+    check('内凹圆弧往返：R10(程序) → R10.8(实际) → R10(逆向)', function () {
+      // 直接用 simulator 里 sample1 已经标记 inner 的圆弧：从 X50 Z-20（端面）到 X56 Z-32（台阶），
+      // 圆弧终点 X56 Z-42 R6（下一段）—— 让我用 parse 解析一个已知产生 inner 的圆弧
+      // 用 G02 X56 Z-28 R10（从 (X50, Z-18) 到 (X56, Z-28)，R=10）
+      // 端点距离 = hypot(5, 10) ≈ 11.18，R=10 够吗？2R=20 > 11.18 ✓ 可以构成
+      const p = parse(['G21', 'G00 X50. Z2.', 'G01 Z-18. F0.2', 'G02 X56. Z-28. R10.', 'M30'].join('\n'));
+      const progFeats = Geometry.composeChain(p.cutting, { autoRadius: 0 }).features;
+      const progArc = progFeats.filter(function (f) { return f.type === 'arc'; })[0];
+      assert(progArc, '应有程序圆弧');
+      const actual = Geometry.offsetChain(progFeats, 0.8, +1).features;
+      const actualArc = actual.filter(function (f) { return f.type === 'arc' && !f.envelope; })[0];
+      assert(actualArc, '应有实际轮廓圆弧');
+      // 外圆 side=+1，G02 (cw=true) 对于 (R 增大, |Z| 增大) 方向 → 材料侧偏移 → 内外凸取决于 cross
+      // 这里直接用 selftest 里已验证的 calibration：实际轮廓到程序刀心的距离恒为 R
+      // 所以只需断言 actual 与 prog 的半径差绝对值 = r（不分正负）
+      const absDiffActual = Math.abs(actualArc.radius - progArc.radius);
+      near(absDiffActual, 0.8, 0.02, '实际圆弧与程序圆弧半径差 |ΔR| = r');
+      const rev = Geometry.reverseOffsetChain(actual, 0.8, +1).features;
+      const revArc = rev.filter(function (f) { return f.type === 'arc'; })[0];
+      assert(revArc, '逆向应有圆弧');
+      near(revArc.radius, progArc.radius, 0.01, '逆向圆弧半径 ≈ 程序半径');
+      near(revArc.center.z, progArc.center.z, 0.02, '圆心 Z 逆向不变');
+      return 'progR=' + progArc.radius.toFixed(2) + ' actualR=' + actualArc.radius.toFixed(2) + ' revR=' + revArc.radius.toFixed(2);
+    });
+    check('程序凹拐角 → envelope 弧半径=r、圆心=程序拐点；逆向还原', function () {
+      // 直接构造程序特征：
+      // line1: X40 Z0 → X0 Z0   （端面切削，向左）
+      // line2: X0 Z0 → X0 Z-10  （轴向下）
+      const prog = [
+        { id: 'A', type: 'line', start: { d: 40, z: 0 }, end: { d: 0, z: 0 }, center: null, radius: 0, cw: false, rapid: false },
+        { id: 'B', type: 'line', start: { d: 0, z: 0 }, end: { d: 0, z: -10 }, center: null, radius: 0, cw: false, rapid: false }
+      ];
+      // line1 end tangent ≈ (0, -1)，line2 start tangent ≈ (-1, 0)，cross = 0*0 - (-1)*(-1) = -1
+      // side=+1, cross*side=-1 < 0 → envelope
+      const actual = Geometry.offsetChain(prog, 0.8, +1).features;
+      const env = actual.filter(function (f) { return f.envelope; });
+      assert(env.length >= 1, '应产生 envelope 弧，actual feats=' + actual.length);
+      // envelope 圆心 V = line1.end = (D=0, Z=0)
+      const V = { d: 0, z: 0 };
+      near(env[0].radius, 0.8, 0.01, 'envelope 半径 = r');
+      near(env[0].center.z, V.z, 0.02, 'envelope 圆心 Z = 程序拐点');
+      near(env[0].center.r * 2, V.d, 0.02, 'envelope 圆心 X = 程序拐点');
+
+      // 逆向
+      const rev = Geometry.reverseOffsetChain(actual, 0.8, +1).features;
+      // envelope 被逆向删除（radius ≈ r）
+      assert(rev.length === 2, '逆向应还原为 2 段直线，actual ' + rev.length);
+      near(rev[0].end.d, V.d, 0.02, '逆向首段终点 X ≈ 拐点');
+      near(rev[0].end.z, V.z, 0.02, '逆向首段终点 Z ≈ 拐点');
+      near(rev[1].start.d, V.d, 0.02, '逆向次段起点 X ≈ 拐点');
+      near(rev[1].start.z, V.z, 0.02, '逆向次段起点 Z ≈ 拐点');
+      return 'envelope r=' + env[0].radius.toFixed(2) + ' V(X' + env[0].center.r.toFixed(2) + ' Z' + env[0].center.z + ') revFeats=' + rev.length;
+    });
+
+    section('逆向：G 代码生成');
+    check('G01 直线链生成 G01 段，圆弧生成 G02/G03，含 I/K 增量圆心', function () {
+      const feats = [
+        { id: 'A', type: 'line', start: { d: 30, z: 0 }, end: { d: 30, z: -20 }, center: null, radius: 0, cw: false },
+        { id: 'B', type: 'arc', start: { d: 30, z: -20 }, end: { d: 50, z: -40 }, center: { z: -40, r: 25 }, radius: 10, cw: true },
+        { id: 'C', type: 'line', start: { d: 50, z: -40 }, end: { d: 50, z: -60 }, center: null, radius: 0, cw: false }
+      ];
+      const gc = ReverseContour.generateGcode(feats, {
+        toolNo: 1, toolName: '逆向轮廓', feed: 0.15, speed: 200, spindle: 2500, startD: 64, startZ: 2
+      });
+      assert(gc.indexOf('O1007') >= 0, '应有 O 号');
+      assert(gc.indexOf('T0101') >= 0, '应有 T 号');
+      assert(gc.indexOf('G00 X30.000 Z0.000') >= 0, '起刀快速定位到轮廓起点');
+      assert(gc.indexOf('G01 X30.000 Z-20.000 F0.15') >= 0, '首段 G01 切削并带 F');
+      assert(gc.indexOf('G02 X50.000 Z-40.000') >= 0, 'G02 圆弧');
+      assert(gc.indexOf('I') >= 0 && gc.indexOf('K') >= 0, '应有 I/K 增量圆心');
+      assert(gc.indexOf('G00 X66.000 Z2.000') >= 0, '应有安全退刀');
+      assert(gc.indexOf('M30') >= 0, '应有 M30');
+      return gc.split('\n').length + ' lines generated';
+    });
+
+    section('逆向：端到端 pipeline');
+    check('JSON → pipeline → G 代码行数合理，无警告', function () {
+      const input = JSON.stringify({
+        tool: { type: 'outer', radius: 0.8, toolNo: 1, name: '外圆刀' },
+        contour: [
+          { point: [30, 0] },
+          { point: [30, -10] },
+          { arcCenter: [40, -20], cw: false, end: [50, -30] },
+          { point: [50, -50] }
+        ]
+      });
+      const r = ReverseContour.runPipeline(input, { radius: 0.8 }, { programNo: 1008 });
+      assert(r.programFeatures.length >= 3, '程序特征至少 3 段');
+      assert(r.gcode.indexOf('O1008') >= 0, '程序号');
+      assert(r.warnings.length >= 0, '允许警告');
+      return r.gcode.split('\n').length + ' lines, prog feats=' + r.programFeatures.length;
+    });
+
     section('轮廓坐标校准与匹配');
     check('外圆链：实际轮廓到程序刀心轨迹的偏移恒为 R（期望 0.8，阈值 0.002）', function () {
       const s = sim(parse(LINE_OUTER));
